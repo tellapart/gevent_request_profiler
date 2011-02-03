@@ -1,0 +1,20 @@
+syntax: glob
+
+*#
+*~
+*.pyc
+*.swo
+*.swp
+*.db
+*gen-*
+.DS_Store
+.classpath
+.project
+.svn/
+.pydevproject
+.metadata
+.settings
+build
+dist
+tellapart_gevent_profiler.egg-info
+

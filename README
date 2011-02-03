@@ -1,0 +1,26 @@
+=======================
+Gevent Request Profiler
+=======================
+
+The Gevent Request Profiler enables the discovery of blocking/non-yielding
+code in request-handling servers implemented with the Gevent networking library
+(http://www.gevent.org/).
+
+Culprits may include blocking I/O (e.g., file I/O, native I/O, or non-
+monkey-patched socket requests) and CPU-intensive code.
+
+Unlike the cProfile module, it is not a deterministic profiler that precisely
+measures the run-times of all function calls. Rather, it identifies
+'execution spans', intervals during which greenlets do not cooperatively yield
+to other greenlets, for a set fraction of requests.
+
+Developed by TellApart (http://www.tellapart.com) and licensed under the
+Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
+
+============
+Installation
+============
+
+To install, run:
+
+  sudo python setup.py install
