@@ -42,24 +42,25 @@ class Profiler(object):
   """A Gevent request profiler.
   """
   def __init__(self, request_profiling_pct, record_request_profile_fn=None,
-               assign_request_info_fn=None):
+               request_info_class=None):
     """Initialize Gevent profiling.
 
     Args:
-      request_profiling_pct - The percent [0.0 - 1.0] of requests to profile.
+      request_profiling_pct -
+        The percent [0.0 - 1.0] of requests to profile.
+
       record_request_profile_fn -
         An optional function that will be called to record profiling
         information about greenlet behavior that occurred while handling a
         request. The function should accept a ProfilingGreenlet argument and a
         RequestProfile argument. If not specified, profiles will simply be
         printed to stdout.
-      assign_request_info_fn -
-        A optional function that will be called to populate a RequestInfo
-        object that describes whether the current request should be profiled,
-        the request path, and other request metadata.  The function should
-        accept a single ProfilingGreenlet argument and udpdate its
-        'request_info' field.  The default implementation will handle
-        event.wsgi.WSGIServer requests.
+
+      request_info_class -
+        An optional RequestInfo subclass that will be instantiated to store
+        request metadata in the profiler. Defaults to WsgiServerRequestInfo
+        (gevent.wsgi); set to PyWsgiServerRequestInfo for gevent.pywsgi or to
+        a different subclass for custom request types.
     """
     # Assign the hub type to be the special profiling hub class.
     if gevent.hub._threadlocal.Hub:
@@ -78,13 +79,12 @@ class Profiler(object):
 
     ProfilingGreenlet._REQUEST_PROFILING_PCT = request_profiling_pct
 
+    ProfilingGreenlet._REQUEST_INFO_CLASS = \
+      request_info_class if request_info_class else WsgiServerRequestInfo
+
     ProfilingGreenlet._RECORD_REQUEST_PROFILE_FN = (
       record_request_profile_fn if record_request_profile_fn
       else _default_record_request_profile)
-
-    ProfilingGreenlet._ASSIGN_REQUEST_INFO_FN = (
-      assign_request_info_fn if assign_request_info_fn
-      else _default_assign_request_info_fn)
 
 class ProfilingHub(gevent.hub.Hub):
   """The hub is the greenlet that runs the Gevent event loop.
@@ -211,14 +211,17 @@ class ProfilingGreenlet(_OriginalGreenletClass):
   notification as a 'switch' because, even though switch() is not called,
   control flow switches to a different greenlet.
   """
-  # The one Hub object.  Assigned in Profiler.
+  # The one Hub object. Assigned in Profiler ctor.
   _HUB = None
 
   # The percent of requests for which profiling should be enabled.
-  # Assigned in Profiler().
+  # Assigned in Profiler ctor.
   _REQUEST_PROFILING_PCT = None
 
-  # The function called to record a RequestProfile. Assigned in initialize().
+  # The RequestInfo subclass to instantiate. Assigned in Profiler ctor.
+  _REQUEST_INFO_CLASS = None
+
+  # The function called to record a RequestProfile. Assigned in Profiler ctor.
   _RECORD_REQUEST_PROFILE_FN = None
 
   def __init__(self, *args, **kwargs):
@@ -227,6 +230,10 @@ class ProfilingGreenlet(_OriginalGreenletClass):
     Accepts the same arguments as the Greenlet constructor.
     """
     _OriginalGreenletClass.__init__(self, *args, **kwargs)
+
+    if type(ProfilingGreenlet._HUB) != ProfilingHub:
+      raise ValueError(
+        'Profiler must be instantiated before creating a ProfilingGreenlet')
 
     # Assign an integer ID to each greenlet, unique while the server process
     # is live.
@@ -247,13 +254,12 @@ class ProfilingGreenlet(_OriginalGreenletClass):
 
     # Only assigned if this is a request-handling greenlet.
     self.first_exec_span_index = 0
-    self.request_info = RequestInfo()
-    ProfilingGreenlet._ASSIGN_REQUEST_INFO_FN(self)
+    self.request_info = ProfilingGreenlet._REQUEST_INFO_CLASS(self)
 
   def run(self):
     """Run the callable associated with this greenlet.
     """
-    if self.request_info.path is not None:
+    if self.request_info.is_request:
       ProfilingGreenlet._HUB.requests_in_progress.add(self)
 
     if self.request_info.should_profile:
@@ -275,7 +281,7 @@ class ProfilingGreenlet(_OriginalGreenletClass):
 
       # If this is a request-handling greenlet, output profiling information
       # about greenlet behavior that occurred while handling the request.
-      if self.request_info.path is not None:
+      if self.request_info.is_request:
         ProfilingGreenlet._HUB.requests_in_progress.remove(self)
 
         if profiling_active:
@@ -307,14 +313,92 @@ class ProfilingGreenlet(_OriginalGreenletClass):
 class RequestInfo(object):
   """An object storing request metadata used by the profiler.
 
-  Currently, this consists of a request path and a flag indicating whether this
-  request should be profiled.
+  An instance of RequestInfo (or a subclass of RequestInfo) is created at
+  greenlet instantiation time.
   """
-  def __init__(self):
+  def __init__(self, profiling_greenlet):
     """Create a RequestInfo.
+
+    Args:
+      profiling_greenlet - The greenlet being instantiated.
     """
-    self.path = None
+    self.profiling_greenlet = profiling_greenlet
+
     self.should_profile = False
+    self.is_request = False
+
+    # The request path. Set by a subclass if 'profiling_greenlet' corresponds to
+    # a request-handling function.
+    self.path = None
+
+class BaseWsgiServerRequestInfo(RequestInfo):
+  """Base class for WsgiServerRequestInfo and PyWsgiServerRequestInfo.
+  """
+  def __init__(self, profiling_greenlet, request_fn_name):
+    """Create a BaseWsgiServerRequestInfo.
+
+    Args:
+      profiling_greenlet - The greenlet being instantiated.
+      request_fn_name - The name of the function expected to be called by
+                        request-handling greenlets.
+    """
+    RequestInfo.__init__(self, profiling_greenlet)
+
+    self.is_request = profiling_greenlet.fn_name == request_fn_name
+
+    if self.is_request:
+      self.should_profile = \
+        random.random() < ProfilingGreenlet._REQUEST_PROFILING_PCT
+
+class WsgiServerRequestInfo(BaseWsgiServerRequestInfo):
+  """Request metadata for gevent.wsgi servers.
+  """
+  def __init__(self, profiling_greenlet):
+    """Create a WsgiServerRequestInfo.
+
+    Args:
+      profiling_greenlet - The greenlet being instantiated.
+    """
+    BaseWsgiServerRequestInfo.__init__(self, profiling_greenlet,
+                                       'gevent.wsgi.WSGIServer.handle')
+
+    if self.is_request:
+      # Set the request path.
+      req = profiling_greenlet.args[0]
+      if '?' in req.uri:
+          path, query = req.uri.split('?', 1)
+      else:
+          path, query = req.uri, ''
+      self.path = urllib.unquote(path)
+
+class PyWsgiServerRequestInfo(BaseWsgiServerRequestInfo):
+  """Request metadata for gevent.pywsgi servers.
+  """
+  from gevent.pywsgi import WSGIHandler, WSGIServer
+
+  class _WsgiHandler(WSGIHandler):
+    """Override the default pywsgi WSGIHandler to set the request path once it's
+    available. Unlike gevent.wsgi, gevent.pywsgi doesn't make the request path
+    available as an argument to gevent.pywsgi.WsgiServer.handle().
+    """
+    def handle_one_response(self):
+      # Set the request path once it's available.
+      gevent.getcurrent().request_info.path = self.environ['PATH_INFO']
+      return PyWsgiServerRequestInfo.WSGIHandler.handle_one_response(self)
+
+  WSGIServer.handler_class = _WsgiHandler
+
+  def __init__(self, profiling_greenlet):
+    """Create a PyWsgiServerRequestInfo.
+
+    Args:
+      profiling_greenlet - The greenlet being instantiated.
+    """
+    BaseWsgiServerRequestInfo.__init__(self, profiling_greenlet,
+                                       'gevent.pywsgi.WSGIServer.handle')
+
+    # The path is set in _WsgiHandler because it's not available as a function
+    # argument to gevent.pywsgi.WsgiServer.handle().
 
 class ExecutionSpan(object):
   """Represents a contiguous time interval during which the Gevent event loop
@@ -452,25 +536,3 @@ def _default_record_request_profile(profiling_greenlet, profile):
     profiling_greenlet - The greenlet in which to record the RequestProfile.
   """
   print profile
-
-def _default_assign_request_info_fn(profiling_greenlet):
-  """Default implementation of 'assign_request_info_fn'.
-
-  Handle gevent.wsgi.WSGIServer requests and conditionally enable profiling
-  based on the value of _REQUEST_PROFILING_PCT.
-
-  Args:
-    profiling_greenlet - The greenlet in which to assign 'request_info'.
-  """
-  # If it's a request-handling greenlet, store the request path.
-  if profiling_greenlet.fn_name == 'gevent.wsgi.WSGIServer.handle':
-    req = profiling_greenlet.args[0]
-    if '?' in req.uri:
-        path, query = req.uri.split('?', 1)
-    else:
-        path, query = req.uri, ''
-    profiling_greenlet.request_info.path = urllib.unquote(path)
-
-    # Determine whether this request should be profiled.
-    profiling_greenlet.request_info.should_profile = \
-      random.random() < ProfilingGreenlet._REQUEST_PROFILING_PCT

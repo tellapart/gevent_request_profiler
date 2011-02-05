@@ -14,6 +14,10 @@ measures the run-times of all function calls. Rather, it identifies
 'execution spans', intervals during which greenlets do not cooperatively yield
 to other greenlets, for a set fraction of requests.
 
+The profiler works with gevent.wsgi and gevent.pywsgi servers out of the box,
+but it's straightforward to add support for other server types. See the
+Profiler doc comment in gevent_profiler.py for details.
+
 Developed by TellApart (http://www.tellapart.com) and licensed under the
 Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
 
@@ -24,3 +28,16 @@ Installation
 To install, run:
 
   sudo python setup.py install
+
+===============
+Getting Started
+===============
+
+The best way to get a feel for the profiler is to bring up a server, make a
+few requests, and watch the greenlet transitions happen.
+
+You can get started by running:
+
+  examples/wsgi_example.py
+
+Toggle between gevent.wsgi and gevent.pywsgi at the top of the script.

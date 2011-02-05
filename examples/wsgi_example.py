@@ -21,6 +21,9 @@ from multiprocessing import Process
 import time
 import urllib
 
+# If True, use gevent.pywsgi; otherwise, use gevent.wsgi.
+USE_PYWSGI = True
+
 def main():
   # Run the server in a separate process.
   p = Process(target=_start_server_process)
@@ -76,9 +79,18 @@ def _start_server_process():
   from tellapart.frontend import util
 
   # In this example, profile 100% of requests.
-  profiler = gevent_profiler.Profiler(request_profiling_pct=1.0)
+  # In a production server, you'd typically profile far fewer.
 
-  util.launch_gevent_wsgi_server(_do_stuff, 8088, 16, 'example server')
+  if USE_PYWSGI:
+    profiler = gevent_profiler.Profiler(
+      request_profiling_pct=1.0,
+      request_info_class=gevent_profiler.PyWsgiServerRequestInfo)
+
+    util.launch_gevent_wsgi_server(_do_stuff, 8088, 16, 'example server',
+                                   use_pywsgi=True)
+  else:
+    profiler = gevent_profiler.Profiler(request_profiling_pct=1.0)
+    util.launch_gevent_wsgi_server(_do_stuff, 8088, 16, 'example server')
 
 if __name__ == '__main__':
   main()
